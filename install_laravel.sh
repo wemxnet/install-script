@@ -11,6 +11,7 @@ PKG_MANAGER=""
 SUDO=""
 TARGET_DIR=""
 DOMAIN=""
+APT_UPDATED="false"
 
 PHP_REQUIRED_EXTENSIONS=(
   "bcmath"
@@ -124,7 +125,10 @@ is_extension_loaded() {
 install_packages() {
   case "$PKG_MANAGER" in
     apt)
-      run $SUDO apt-get update
+      if [[ "$APT_UPDATED" != "true" ]]; then
+        run $SUDO apt-get update
+        APT_UPDATED="true"
+      fi
       run $SUDO apt-get install -y "$@"
       ;;
     dnf)
@@ -147,6 +151,46 @@ install_packages() {
       exit 1
       ;;
   esac
+}
+
+ensure_base_packages() {
+  step "Installing base system tools if missing"
+  local packages=()
+
+  if ! command -v git >/dev/null 2>&1; then
+    packages+=("git")
+  else
+    ok "git is already installed"
+  fi
+
+  if ! command -v curl >/dev/null 2>&1; then
+    packages+=("curl")
+  else
+    ok "curl is already installed"
+  fi
+
+  if ! command -v openssl >/dev/null 2>&1; then
+    packages+=("openssl")
+  else
+    ok "openssl is already installed"
+  fi
+
+  case "$PKG_MANAGER" in
+    apt)
+      packages+=("ca-certificates" "unzip")
+      ;;
+    dnf|yum|pacman|zypper|apk)
+      packages+=("unzip")
+      ;;
+  esac
+
+  if [[ ${#packages[@]} -gt 0 ]]; then
+    install_packages "${packages[@]}"
+  fi
+
+  require_cmd git
+  require_cmd curl
+  require_cmd openssl
 }
 
 install_php_and_extensions() {
@@ -293,6 +337,7 @@ install_composer() {
 
 prepare_target_dir() {
   step "Preparing target directory"
+  local created_dir="false"
   if [[ -d "$TARGET_DIR" ]] && [[ -n "$(ls -A "$TARGET_DIR" 2>/dev/null || true)" ]]; then
     warn "Target directory is not empty: $TARGET_DIR"
     read -r -p "Continue and reuse this directory? [y/N]: " answer
@@ -302,31 +347,67 @@ prepare_target_dir() {
     fi
   else
     run $SUDO mkdir -p "$TARGET_DIR"
+    created_dir="true"
   fi
 
   local active_user="${SUDO_USER:-$USER}"
-  run $SUDO chown -R "$active_user":"$active_user" "$TARGET_DIR"
+  if [[ "$created_dir" == "true" ]]; then
+    run $SUDO chown "$active_user":"$active_user" "$TARGET_DIR"
+  else
+    ok "Leaving ownership unchanged for existing directory"
+  fi
   ok "Target directory ready"
+}
+
+is_existing_laravel_project() {
+  [[ -f "$TARGET_DIR/artisan" && -f "$TARGET_DIR/composer.json" ]]
 }
 
 clone_and_install_laravel() {
   step "Cloning Laravel application"
-  if [[ -d "$TARGET_DIR/.git" ]]; then
-    warn "Git repository already present in target directory, skipping clone"
-  elif [[ -f "$TARGET_DIR/composer.json" ]]; then
-    warn "Existing Laravel-like project detected, skipping clone"
+  if is_existing_laravel_project; then
+    ok "Existing Laravel project detected, reusing it"
+    if [[ -d "$TARGET_DIR/.git" ]]; then
+      local repo_origin
+      repo_origin="$(git -C "$TARGET_DIR" remote get-url origin 2>/dev/null || true)"
+      if [[ "$repo_origin" == "$APP_REPO" ]]; then
+        read -r -p "Pull latest changes from laravel/laravel? [y/N]: " pull_answer
+        if [[ "$pull_answer" =~ ^[Yy]$ ]]; then
+          run git -C "$TARGET_DIR" pull --ff-only
+        fi
+      fi
+    fi
+  elif [[ -n "$(ls -A "$TARGET_DIR" 2>/dev/null || true)" ]]; then
+    error "Target directory is not empty and does not look like a Laravel project."
+    error "Use an empty directory or point to an existing Laravel project."
+    exit 1
   else
     run git clone "$APP_REPO" "$TARGET_DIR"
+  fi
+
+  if [[ ! -f "$TARGET_DIR/composer.json" || ! -f "$TARGET_DIR/artisan" ]]; then
+    error "No Laravel project found in $TARGET_DIR after clone/reuse step."
+    exit 1
   fi
 
   step "Installing Laravel dependencies with Composer"
   (
     cd "$TARGET_DIR"
     run composer install --no-interaction --prefer-dist --optimize-autoloader
-    if [[ ! -f .env ]]; then
+    if [[ ! -f .env && -f .env.example ]]; then
       run cp .env.example .env
     fi
-    run php artisan key:generate --force
+    if [[ -f .env ]]; then
+      if ! grep -Eq '^APP_KEY=base64:' .env; then
+        run php artisan key:generate --force
+      else
+        ok "APP_KEY already set in .env, skipping key generation"
+      fi
+    else
+      warn ".env not found (and no .env.example to copy); skipping APP_KEY generation"
+    fi
+    run mkdir -p storage/logs bootstrap/cache
+    run chmod -R ug+rwx storage bootstrap/cache || true
   )
   ok "Laravel project is ready"
 }
@@ -362,19 +443,49 @@ enable_and_restart_service() {
 }
 
 detect_php_fpm_service() {
+  if ! command -v systemctl >/dev/null 2>&1; then
+    printf "php-fpm"
+    return
+  fi
+
   local candidates=(
+    "php8.4-fpm"
     "php8.3-fpm"
+    "php8.2-fpm"
+    "php8.1-fpm"
     "php-fpm"
     "php83-php-fpm"
+    "php84-php-fpm"
   )
   local service_name
   for service_name in "${candidates[@]}"; do
-    if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files | awk '{print $1}' | grep -qx "${service_name}.service"; then
+    if $SUDO systemctl list-unit-files | awk '{print $1}' | grep -qx "${service_name}.service"; then
       printf "%s" "$service_name"
       return
     fi
   done
-  printf "php-fpm"
+  printf ""
+}
+
+detect_php_fpm_socket() {
+  local candidates=(
+    "/run/php/php8.4-fpm.sock"
+    "/run/php/php8.3-fpm.sock"
+    "/run/php/php8.2-fpm.sock"
+    "/run/php/php8.1-fpm.sock"
+    "/run/php-fpm/www.sock"
+    "/run/php-fpm/php-fpm.sock"
+    "/run/php-fpm83/php-fpm.sock"
+    "/var/run/php-fpm/www.sock"
+  )
+  local socket_path
+  for socket_path in "${candidates[@]}"; do
+    if [[ -S "$socket_path" ]]; then
+      printf "%s" "$socket_path"
+      return
+    fi
+  done
+  printf ""
 }
 
 generate_ssl_and_nginx_config() {
@@ -397,14 +508,21 @@ generate_ssl_and_nginx_config() {
   local nginx_conf="/etc/nginx/conf.d/laravel-${DOMAIN}.conf"
   local php_fpm_service
   php_fpm_service="$(detect_php_fpm_service)"
-  local php_socket="/run/php/php8.3-fpm.sock"
+  if [[ -n "$php_fpm_service" ]]; then
+    enable_and_restart_service "$php_fpm_service"
+  else
+    warn "Could not auto-detect PHP-FPM service name; continuing"
+  fi
 
-  if [[ "$PKG_MANAGER" == "dnf" || "$PKG_MANAGER" == "yum" ]]; then
-    php_socket="/run/php-fpm/www.sock"
-  elif [[ "$PKG_MANAGER" == "pacman" ]]; then
-    php_socket="/run/php-fpm/php-fpm.sock"
-  elif [[ "$PKG_MANAGER" == "apk" ]]; then
-    php_socket="/run/php-fpm83/php-fpm.sock"
+  local php_socket
+  php_socket="$(detect_php_fpm_socket)"
+  if [[ -z "$php_socket" ]]; then
+    warn "Could not auto-detect PHP-FPM socket. Falling back to 127.0.0.1:9000."
+    php_socket="127.0.0.1:9000"
+  fi
+  local php_fastcgi_pass="$php_socket"
+  if [[ "$php_socket" == /* ]]; then
+    php_fastcgi_pass="unix:${php_socket}"
   fi
 
   step "Writing Nginx HTTPS site configuration"
@@ -443,7 +561,7 @@ server {
         include fastcgi_params;
         fastcgi_param SCRIPT_FILENAME \$realpath_root\$fastcgi_script_name;
         fastcgi_param DOCUMENT_ROOT \$realpath_root;
-        fastcgi_pass unix:${php_socket};
+        fastcgi_pass ${php_fastcgi_pass};
     }
 
     location ~ /\.(?!well-known).* {
@@ -455,7 +573,6 @@ EOF
   step "Testing and reloading Nginx"
   run $SUDO nginx -t
 
-  enable_and_restart_service "$php_fpm_service"
   enable_and_restart_service "nginx"
   ok "Nginx is serving Laravel over HTTPS"
 }
@@ -472,9 +589,7 @@ main() {
   print_banner
   ensure_sudo
   detect_pkg_manager
-  require_cmd git
-  require_cmd curl
-  require_cmd openssl
+  ensure_base_packages
 
   prompt_user_inputs
   install_php_and_extensions
