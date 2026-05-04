@@ -524,13 +524,6 @@ else
     success "Using PHP-FPM socket: $PHP_FPM_SOCKET"
 fi
 
-# fastcgi_pass: unix:/path/to.sock or host:port (TCP)
-if [[ "$PHP_FPM_SOCKET" == /* ]]; then
-    NGINX_FASTCGI_PASS="unix:${PHP_FPM_SOCKET}"
-else
-    NGINX_FASTCGI_PASS="${PHP_FPM_SOCKET}"
-fi
-
 NGINX_CONF_NAME="laravel-${DOMAIN}"
 NGINX_CONF=""
 
@@ -541,49 +534,38 @@ else
     NGINX_CONF="/etc/nginx/conf.d/${NGINX_CONF_NAME}.conf"
 fi
 
-# HTTP-only bootstrap: SSL paths do not exist until certbot runs.
 cat > "$NGINX_CONF" <<EOF
 server {
     listen 80;
+    listen [::]:80;
+
     server_name ${DOMAIN};
-    server_tokens off;
-
     root ${TARGET_DIR}/public;
-    index index.php;
 
-    access_log /var/log/nginx/${DOMAIN}-access.log;
-    error_log  /var/log/nginx/${DOMAIN}-error.log;
+    index index.php index.html;
 
-    client_max_body_size 100m;
-    client_body_timeout 120s;
+    charset utf-8;
 
-    sendfile off;
-
-    add_header X-Content-Type-Options nosniff;
-    add_header X-XSS-Protection "1; mode=block";
+    add_header X-Frame-Options "SAMEORIGIN";
+    add_header X-Content-Type-Options "nosniff";
 
     location / {
         try_files \$uri \$uri/ /index.php?\$query_string;
     }
 
-    location ~ \.php\$ {
-        fastcgi_split_path_info ^(.+\.php)(/.+)\$;
-        fastcgi_pass ${NGINX_FASTCGI_PASS};
-        fastcgi_index index.php;
+    location = /favicon.ico { access_log off; log_not_found off; }
+    location = /robots.txt  { access_log off; log_not_found off; }
+
+    error_page 404 /index.php;
+
+    location ~ ^/index\.php(/|$) {
+        fastcgi_pass ${PHP_FPM_SOCKET};
+        fastcgi_param SCRIPT_FILENAME \$realpath_root\$fastcgi_script_name;
         include fastcgi_params;
-        fastcgi_param PHP_VALUE "upload_max_filesize = 100M \\n post_max_size=100M";
-        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
-        fastcgi_param HTTP_PROXY "";
-        fastcgi_intercept_errors off;
-        fastcgi_buffer_size 16k;
-        fastcgi_buffers 4 16k;
-        fastcgi_connect_timeout 300;
-        fastcgi_send_timeout 300;
-        fastcgi_read_timeout 300;
-        include /etc/nginx/fastcgi_params;
+        fastcgi_hide_header X-Powered-By;
     }
 
-    location ~ /\.ht {
+    location ~ /\.(?!well-known).* {
         deny all;
     }
 }
