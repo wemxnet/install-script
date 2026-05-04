@@ -128,6 +128,15 @@ if [[ -z "$TARGET_DIR" ]]; then
     die "Target directory cannot be empty."
 fi
 
+if [[ -e "$TARGET_DIR" ]]; then
+    if [[ ! -d "$TARGET_DIR" ]]; then
+        die "Target path exists and is not a directory: ${TARGET_DIR}. Remove it or choose a different path."
+    fi
+    if [[ -n "$(ls -A "$TARGET_DIR" 2>/dev/null || true)" ]]; then
+        die "A project is already installed in ${TARGET_DIR}. The target directory must be empty (or not exist) before running this installer. Remove or relocate the existing files, then try again."
+    fi
+fi
+
 section "Install settings"
 echo -e "Domain:           ${BOLD}${DOMAIN}${RESET}"
 echo -e "Target directory: ${BOLD}${TARGET_DIR}${RESET}"
@@ -410,6 +419,9 @@ fi
 
 section "Checking Composer"
 
+export COMPOSER_NO_INTERACTION=1
+export COMPOSER_ALLOW_SUPERUSER=1
+
 if command -v composer >/dev/null 2>&1; then
     success "Composer is already installed: $(composer --version --no-ansi | head -n 1)"
 else
@@ -437,34 +449,8 @@ fi
 
 section "Installing Laravel"
 
-if [[ -d "$TARGET_DIR" && -n "$(ls -A "$TARGET_DIR" 2>/dev/null || true)" ]]; then
-    warn "Target directory already exists and is not empty: $TARGET_DIR"
-    echo
-    echo "Choose what to do:"
-    echo "  1) Stop installation"
-    echo "  2) Move existing directory to a timestamped backup"
-    echo "  3) Use existing directory and skip clone"
-    echo
-    read -rp "Choice [1/2/3]: " DIR_CHOICE
-
-    case "$DIR_CHOICE" in
-        2)
-            BACKUP_DIR="${TARGET_DIR}.backup.$(date +%Y%m%d%H%M%S)"
-            run "Backing up existing directory to $BACKUP_DIR" mv "$TARGET_DIR" "$BACKUP_DIR"
-            ;;
-        3)
-            success "Using existing directory"
-            ;;
-        *)
-            die "Installation stopped to avoid overwriting existing files."
-            ;;
-    esac
-fi
-
-if [[ ! -d "$TARGET_DIR" || -z "$(ls -A "$TARGET_DIR" 2>/dev/null || true)" ]]; then
-    mkdir -p "$(dirname "$TARGET_DIR")"
-    run "Cloning laravel/laravel" git clone "$REPO_URL" "$TARGET_DIR"
-fi
+mkdir -p "$(dirname "$TARGET_DIR")"
+run "Cloning laravel/laravel" git clone "$REPO_URL" "$TARGET_DIR"
 
 cd "$TARGET_DIR"
 
@@ -538,6 +524,13 @@ else
     success "Using PHP-FPM socket: $PHP_FPM_SOCKET"
 fi
 
+# fastcgi_pass: unix:/path/to.sock or host:port (TCP)
+if [[ "$PHP_FPM_SOCKET" == /* ]]; then
+    NGINX_FASTCGI_PASS="unix:${PHP_FPM_SOCKET}"
+else
+    NGINX_FASTCGI_PASS="${PHP_FPM_SOCKET}"
+fi
+
 NGINX_CONF_NAME="laravel-${DOMAIN}"
 NGINX_CONF=""
 
@@ -548,38 +541,49 @@ else
     NGINX_CONF="/etc/nginx/conf.d/${NGINX_CONF_NAME}.conf"
 fi
 
+# HTTP-only bootstrap: SSL paths do not exist until certbot runs.
 cat > "$NGINX_CONF" <<EOF
 server {
     listen 80;
-    listen [::]:80;
-
     server_name ${DOMAIN};
+    server_tokens off;
+
     root ${TARGET_DIR}/public;
+    index index.php;
 
-    index index.php index.html;
+    access_log /var/log/nginx/${DOMAIN}-access.log;
+    error_log  /var/log/nginx/${DOMAIN}-error.log;
 
-    charset utf-8;
+    client_max_body_size 100m;
+    client_body_timeout 120s;
 
-    add_header X-Frame-Options "SAMEORIGIN";
-    add_header X-Content-Type-Options "nosniff";
+    sendfile off;
+
+    add_header X-Content-Type-Options nosniff;
+    add_header X-XSS-Protection "1; mode=block";
 
     location / {
         try_files \$uri \$uri/ /index.php?\$query_string;
     }
 
-    location = /favicon.ico { access_log off; log_not_found off; }
-    location = /robots.txt  { access_log off; log_not_found off; }
-
-    error_page 404 /index.php;
-
-    location ~ ^/index\.php(/|$) {
-        fastcgi_pass ${PHP_FPM_SOCKET};
-        fastcgi_param SCRIPT_FILENAME \$realpath_root\$fastcgi_script_name;
+    location ~ \.php\$ {
+        fastcgi_split_path_info ^(.+\.php)(/.+)\$;
+        fastcgi_pass ${NGINX_FASTCGI_PASS};
+        fastcgi_index index.php;
         include fastcgi_params;
-        fastcgi_hide_header X-Powered-By;
+        fastcgi_param PHP_VALUE "upload_max_filesize = 100M \\n post_max_size=100M";
+        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
+        fastcgi_param HTTP_PROXY "";
+        fastcgi_intercept_errors off;
+        fastcgi_buffer_size 16k;
+        fastcgi_buffers 4 16k;
+        fastcgi_connect_timeout 300;
+        fastcgi_send_timeout 300;
+        fastcgi_read_timeout 300;
+        include /etc/nginx/fastcgi_params;
     }
 
-    location ~ /\.(?!well-known).* {
+    location ~ /\.ht {
         deny all;
     }
 }
