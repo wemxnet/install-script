@@ -464,7 +464,9 @@ fi
 
 run "Generating Laravel APP_KEY" php artisan key:generate --force
 
-# Laravel storage permissions
+# Laravel storage / project tree ownership for nginx + php-fpm (TARGET_DIR):
+# - Debian/Ubuntu (nginx or Apache), not RHEL: www-data:www-data
+# - RHEL/CentOS-style (dnf/yum) with nginx: nginx:nginx
 WEB_USER="www-data"
 
 case "$PKG_MANAGER" in
@@ -559,7 +561,7 @@ server {
     error_page 404 /index.php;
 
     location ~ ^/index\.php(/|$) {
-        fastcgi_pass ${PHP_FPM_SOCKET};
+        fastcgi_pass unix:${PHP_FPM_SOCKET};
         fastcgi_param SCRIPT_FILENAME \$realpath_root\$fastcgi_script_name;
         include fastcgi_params;
         fastcgi_hide_header X-Powered-By;
@@ -630,6 +632,61 @@ else
     echo "  - DNS for ${DOMAIN} does not point to this server"
     echo "  - Ports 80/443 are blocked by firewall/security group"
     echo "  - Cloudflare proxy is interfering with validation"
+fi
+
+# ------------------------------------------------------------
+# Cron scheduler
+# ------------------------------------------------------------
+
+section "Configuring cron scheduler"
+
+SCHEDULE_CRON_LINE="* * * * * php ${TARGET_DIR}/artisan schedule:run >> /dev/null 2>&1"
+
+if crontab -l 2>/dev/null | rg -Fq "$SCHEDULE_CRON_LINE"; then
+    success "Cron schedule already exists"
+else
+    run "Adding Laravel scheduler cron entry" bash -c "(crontab -l 2>/dev/null || true; echo \"$SCHEDULE_CRON_LINE\") | crontab -"
+fi
+
+# ------------------------------------------------------------
+# Queue worker (systemd)
+# ------------------------------------------------------------
+
+section "Configuring queue worker"
+
+QUEUE_SERVICE_NAME="wemx-queue-worker"
+QUEUE_SERVICE_FILE="/etc/systemd/system/${QUEUE_SERVICE_NAME}.service"
+
+if command -v systemctl >/dev/null 2>&1; then
+    if [[ -f "$QUEUE_SERVICE_FILE" ]] || systemctl list-unit-files 2>/dev/null | rg -q "^${QUEUE_SERVICE_NAME}\.service"; then
+        success "Queue worker service already exists: ${QUEUE_SERVICE_NAME}.service"
+    else
+        PHP_BIN="$(command -v php || echo /usr/bin/php)"
+
+        cat > "$QUEUE_SERVICE_FILE" <<EOF
+[Unit]
+Description=WemX Queue Worker
+
+[Service]
+# On some systems the user and group might be different.
+# Some systems use apache or nginx as the user and group.
+User=${WEB_USER}
+Group=${WEB_USER}
+Restart=always
+ExecStart=${PHP_BIN} ${TARGET_DIR}/artisan queue:work
+StartLimitInterval=180
+StartLimitBurst=30
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+        run "Reloading systemd daemon" systemctl daemon-reload
+        run "Enabling queue worker service" systemctl enable --now "$QUEUE_SERVICE_NAME"
+    fi
+else
+    warn "systemd not detected; skipping queue worker service setup"
 fi
 
 # ------------------------------------------------------------
