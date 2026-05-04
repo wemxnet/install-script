@@ -6,6 +6,7 @@ APP_NAME="Laravel"
 DEFAULT_DIR="/var/www/laravel"
 REPO_URL="https://github.com/laravel/laravel.git"
 MIN_PHP_VERSION="8.3"
+TARGET_PHP_VERSION="8.5"
 
 # ------------------------------------------------------------
 # UI
@@ -39,9 +40,9 @@ logo() {
     cat <<'EOF'
 ╭──────────────────────────────────────────────╮
 │                                              │
-│        Laravel Fresh Install Script           │
+│        WemX (v3) Auto Install Script         │
 │                                              │
-│        PHP 8.3+ • Composer • Nginx • SSL      │
+│        PHP 8.3+ • Composer • Nginx • SSL     │
 │                                              │
 ╰──────────────────────────────────────────────╯
 EOF
@@ -265,10 +266,12 @@ else
 fi
 
 install_php() {
+    local php_pkg_version="$TARGET_PHP_VERSION"
+
     case "$PKG_MANAGER" in
         apt)
-            if ! apt-cache show php8.3 >/dev/null 2>&1; then
-                warn "PHP 8.3 packages were not found in current apt repositories"
+            if ! apt-cache show "php${php_pkg_version}" >/dev/null 2>&1; then
+                warn "PHP ${php_pkg_version} packages were not found in current apt repositories"
 
                 if grep -qi ubuntu /etc/os-release 2>/dev/null; then
                     run "Adding Ondřej PHP PPA for Ubuntu" add-apt-repository -y ppa:ondrej/php
@@ -284,15 +287,15 @@ install_php() {
             fi
 
             install_packages \
-                php8.3 php8.3-cli php8.3-fpm php8.3-common \
-                php8.3-curl php8.3-mbstring php8.3-xml php8.3-zip \
-                php8.3-bcmath php8.3-intl php8.3-sqlite3 php8.3-mysql
+                "php${php_pkg_version}" "php${php_pkg_version}-cli" "php${php_pkg_version}-fpm" "php${php_pkg_version}-common" \
+                "php${php_pkg_version}-curl" "php${php_pkg_version}-mbstring" "php${php_pkg_version}-xml" "php${php_pkg_version}-zip" \
+                "php${php_pkg_version}-bcmath" "php${php_pkg_version}-intl" "php${php_pkg_version}-sqlite3" "php${php_pkg_version}-mysql"
             ;;
 
         dnf)
             if command -v dnf >/dev/null 2>&1; then
                 dnf module reset php -y >/dev/null 2>&1 || true
-                dnf module enable php:8.3 -y >/dev/null 2>&1 || true
+                dnf module enable "php:${php_pkg_version}" -y >/dev/null 2>&1 || true
             fi
 
             install_packages \
@@ -395,7 +398,7 @@ section "Configuring PHP-FPM"
 
 PHP_FPM_SERVICE=""
 
-for svc in php8.3-fpm php83-php-fpm php-fpm php-fpm83 php83-fpm php8-fpm; do
+for svc in "php${TARGET_PHP_VERSION}-fpm" php85-php-fpm php-fpm85 php85-fpm php8-fpm php8.3-fpm php83-php-fpm php-fpm83 php83-fpm php-fpm; do
     if systemctl list-unit-files 2>/dev/null | grep -q "^${svc}.service"; then
         PHP_FPM_SERVICE="$svc"
         break
@@ -497,6 +500,18 @@ fi
 run "Optimizing Laravel config" php artisan config:clear
 run "Caching Laravel routes/config/views" bash -c "php artisan config:cache && php artisan route:cache || true && php artisan view:cache || true"
 
+# Run migrations after install. If DB is not configured yet, continue and show guidance.
+section "Running database migrations"
+if php artisan migrate --force >/tmp/laravel-migrate.log 2>&1; then
+    success "Database migrations completed"
+else
+    warn "Database migration failed"
+    warn "Laravel is installed, but database credentials may not be configured in .env yet."
+    echo
+    echo "Migration output:"
+    tail -n 30 /tmp/laravel-migrate.log || true
+fi
+
 # ------------------------------------------------------------
 # Nginx configuration
 # ------------------------------------------------------------
@@ -506,6 +521,10 @@ section "Configuring Nginx"
 PHP_FPM_SOCKET=""
 
 for sock in \
+    /run/php/php8.5-fpm.sock \
+    /var/run/php/php8.5-fpm.sock \
+    /run/php-fpm/php-fpm85.sock \
+    /run/php85-fpm.sock \
     /run/php/php8.3-fpm.sock \
     /var/run/php/php8.3-fpm.sock \
     /run/php-fpm/www.sock \
