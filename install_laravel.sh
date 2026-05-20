@@ -574,21 +574,26 @@ run "Copying WemX files into target directory" cp -a "${EXTRACT_DIR}/wemx/." "$T
 cd "$TARGET_DIR"
 
 if [[ -f composer.json ]]; then
-    run "Installing Composer dependencies" composer install --no-interaction --prefer-dist --optimize-autoloader
+    info "Skipping Composer install because release assets already include dependencies"
 else
     warn "composer.json was not found; skipping Composer dependency installation"
 fi
 
+ENV_CREATED=false
+
 if [[ ! -f ".env" && -f ".env.example" ]]; then
     run "Creating .env file" cp .env.example .env
+    ENV_CREATED=true
 elif [[ -f ".env" ]]; then
     success ".env already exists"
 else
     warn ".env.example was not found; skipping .env creation"
 fi
 
-if [[ -f artisan ]]; then
+if [[ "$ENV_CREATED" == true && -f artisan ]]; then
     run "Generating WemX APP_KEY" php artisan key:generate --force
+elif [[ "$ENV_CREATED" != true ]]; then
+    info "Skipping APP_KEY generation because .env already existed"
 else
     warn "artisan was not found; skipping APP_KEY generation"
 fi
@@ -854,13 +859,13 @@ echo -e "Project directory: ${BOLD}${TARGET_DIR}${RESET}"
 echo -e "Nginx config:      ${BOLD}${NGINX_CONF}${RESET}"
 echo
 
-echo -e "${BOLD}Open your application:${RESET}"
-echo -e "  ${CYAN}http://${DOMAIN}${RESET}"
-
+echo
+echo -e "${BOLD}Continue installation in your browser:${RESET}"
 if [[ "$SSL_OK" == true ]]; then
-    echo -e "  ${CYAN}https://${DOMAIN}${RESET}"
+    echo -e "  ${CYAN}https://${DOMAIN}/install${RESET}"
+else
+    echo -e "  ${CYAN}http://${DOMAIN}/install${RESET}"
 fi
-
 echo
 echo -e "${DIM}Useful commands:${RESET}"
 echo "  cd ${TARGET_DIR}"
@@ -868,5 +873,4 @@ echo "  php artisan about"
 echo "  nginx -t"
 echo "  certbot certificates"
 echo
-warn "Database migrations were not run by this installer."
 success "Done"
