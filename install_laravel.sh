@@ -292,7 +292,8 @@ install_php() {
             install_packages \
                 "php${php_pkg_version}" "php${php_pkg_version}-cli" "php${php_pkg_version}-fpm" "php${php_pkg_version}-common" \
                 "php${php_pkg_version}-curl" "php${php_pkg_version}-mbstring" "php${php_pkg_version}-xml" "php${php_pkg_version}-zip" \
-                "php${php_pkg_version}-bcmath" "php${php_pkg_version}-intl" "php${php_pkg_version}-sqlite3" "php${php_pkg_version}-mysql"
+                "php${php_pkg_version}-bcmath" "php${php_pkg_version}-intl" "php${php_pkg_version}-sqlite3" "php${php_pkg_version}-mysql" \
+                "php${php_pkg_version}-soap"
             ;;
 
         dnf)
@@ -303,13 +304,13 @@ install_php() {
 
             install_packages \
                 php php-cli php-fpm php-common php-curl php-mbstring \
-                php-xml php-zip php-bcmath php-intl php-pdo php-mysqlnd php-sqlite3
+                php-xml php-zip php-bcmath php-intl php-pdo php-mysqlnd php-sqlite3 php-soap
             ;;
 
         yum)
             install_packages \
                 php php-cli php-fpm php-common php-curl php-mbstring \
-                php-xml php-zip php-bcmath php-intl php-pdo php-mysqlnd
+                php-xml php-zip php-bcmath php-intl php-pdo php-mysqlnd php-soap
             ;;
 
         pacman)
@@ -320,7 +321,7 @@ install_php() {
         zypper)
             install_packages \
                 php8 php8-fpm php8-curl php8-mbstring php8-openssl \
-                php8-xmlreader php8-xmlwriter php8-zip php8-bcmath php8-intl php8-pdo
+                php8-xmlreader php8-xmlwriter php8-zip php8-bcmath php8-intl php8-pdo php8-soap
             ;;
 
         apk)
@@ -329,7 +330,7 @@ install_php() {
                 php83-mbstring php83-xml php83-xmlreader php83-xmlwriter \
                 php83-openssl php83-phar php83-tokenizer php83-dom \
                 php83-fileinfo php83-pdo php83-pdo_sqlite php83-pdo_mysql \
-                php83-session php83-ctype php83-simplexml php83-zip php83-bcmath php83-intl
+                php83-session php83-ctype php83-simplexml php83-zip php83-bcmath php83-intl php83-soap
 
             if ! command -v php >/dev/null 2>&1 && command -v php83 >/dev/null 2>&1; then
                 ln -sf "$(command -v php83)" /usr/local/bin/php
