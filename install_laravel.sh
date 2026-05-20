@@ -867,6 +867,9 @@ else
     echo -e "  ${CYAN}http://${DOMAIN}/install${RESET}"
 fi
 echo
+warn "You will need a WemX license key to complete setup in your browser."
+echo -e "  ${BOLD}Obtain your license key at:${RESET} ${CYAN}https://app.wemx.net${RESET}"
+echo
 echo -e "${DIM}Useful commands:${RESET}"
 echo "  cd ${TARGET_DIR}"
 echo "  php artisan about"
