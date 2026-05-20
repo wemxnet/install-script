@@ -558,9 +558,9 @@ run "Downloading WemX release asset" curl -fL "$ASSET_URL" -o "$RELEASE_ZIP"
 mkdir -p "$EXTRACT_DIR"
 run "Extracting WemX release asset" unzip -q "$RELEASE_ZIP" -d "$EXTRACT_DIR"
 
-if [[ ! -d "${EXTRACT_DIR}/wemx" ]]; then
+if [[ ! -f "${EXTRACT_DIR}/artisan" || ! -d "${EXTRACT_DIR}/public" ]]; then
     echo
-    warn "The release asset did not contain the expected wemx/ directory."
+    warn "The release asset does not look like a valid WemX project root."
     echo
     echo "Extracted files:"
     find "$EXTRACT_DIR" -maxdepth 2 -mindepth 1 -print | sed 's#^#  #'
@@ -569,7 +569,7 @@ if [[ ! -d "${EXTRACT_DIR}/wemx" ]]; then
 fi
 
 mkdir -p "$TARGET_DIR"
-run "Copying WemX files into target directory" cp -a "${EXTRACT_DIR}/wemx/." "$TARGET_DIR/"
+run "Copying WemX files into target directory" cp -a "${EXTRACT_DIR}/." "$TARGET_DIR/"
 
 cd "$TARGET_DIR"
 
