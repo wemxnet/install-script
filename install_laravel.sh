@@ -2,9 +2,9 @@
 
 set -Eeuo pipefail
 
-APP_NAME="WemX"
-DEFAULT_DIR="/var/www/wemx"
-WEMX_RELEASES_API_URL="https://api.github.com/repos/wemxnet/wemx/releases/latest"
+APP_NAME="Laravel"
+DEFAULT_DIR="/var/www/laravel"
+REPO_URL="https://github.com/laravel/laravel.git"
 MIN_PHP_VERSION="8.3"
 TARGET_PHP_VERSION="8.5"
 
@@ -81,7 +81,7 @@ run() {
     shift
 
     echo -ne "${BLUE}●${RESET} ${message}..."
-    if "$@" >/tmp/wemx-installer.log 2>&1; then
+    if "$@" >/tmp/laravel-installer.log 2>&1; then
         echo -e "\r${GREEN}✔${RESET} ${message}"
     else
         echo -e "\r${RED}✖${RESET} ${message}"
@@ -90,7 +90,7 @@ run() {
         echo "  $*"
         echo
         echo "Last output:"
-        tail -n 40 /tmp/wemx-installer.log || true
+        tail -n 40 /tmp/laravel-installer.log || true
         exit 1
     fi
 }
@@ -109,7 +109,7 @@ ask() {
 # ------------------------------------------------------------
 
 if [[ "$EUID" -ne 0 ]]; then
-    die "Please run this script as root, for example: sudo bash install-wemx.sh"
+    die "Please run this script as root, for example: sudo bash install-laravel.sh"
 fi
 
 logo
@@ -355,7 +355,7 @@ success "PHP $PHP_VERSION is ready"
 # PHP extensions
 # ------------------------------------------------------------
 
-section "Checking ${APP_NAME} PHP extensions"
+section "Checking Laravel PHP extensions"
 
 REQUIRED_EXTENSIONS=(
     ctype
@@ -447,76 +447,13 @@ else
 fi
 
 # ------------------------------------------------------------
-# Download WemX
+# Clone Laravel
 # ------------------------------------------------------------
 
-section "Installing ${APP_NAME}"
+section "Installing Laravel"
 
 mkdir -p "$(dirname "$TARGET_DIR")"
-
-WEMX_RELEASE_JSON="$(curl -fsSL "$WEMX_RELEASES_API_URL")" || die "Failed to fetch latest ${APP_NAME} release metadata from GitHub."
-
-WEMX_RELEASE_TAG="$(printf '%s' "$WEMX_RELEASE_JSON" | php -r '
-$json = stream_get_contents(STDIN);
-$data = json_decode($json, true);
-if (!is_array($data)) {
-    exit(1);
-}
-echo $data["tag_name"] ?? "";
-')"
-
-WEMX_RELEASE_ASSET_URL="$(printf '%s' "$WEMX_RELEASE_JSON" | php -r '
-$json = stream_get_contents(STDIN);
-$data = json_decode($json, true);
-if (!is_array($data) || !isset($data["assets"]) || !is_array($data["assets"])) {
-    exit(1);
-}
-
-$preferred = "";
-$fallback = "";
-foreach ($data["assets"] as $asset) {
-    if (!is_array($asset)) {
-        continue;
-    }
-    $name = strtolower((string)($asset["name"] ?? ""));
-    $url = (string)($asset["browser_download_url"] ?? "");
-    if ($url === "" || !str_ends_with($name, ".zip")) {
-        continue;
-    }
-    if ($fallback === "") {
-        $fallback = $url;
-    }
-    if (str_contains($name, "app") && str_contains($name, "build")) {
-        $preferred = $url;
-        break;
-    }
-}
-
-echo $preferred !== "" ? $preferred : $fallback;
-')"
-
-if [[ -z "$WEMX_RELEASE_ASSET_URL" ]]; then
-    die "Could not find a ZIP release asset in the latest ${APP_NAME} release."
-fi
-
-WEMX_TMP_DIR="$(mktemp -d)"
-WEMX_ZIP_PATH="${WEMX_TMP_DIR}/wemx-release.zip"
-WEMX_EXTRACT_DIR="${WEMX_TMP_DIR}/extracted"
-
-run "Downloading ${APP_NAME} release asset" curl -fL "$WEMX_RELEASE_ASSET_URL" -o "$WEMX_ZIP_PATH"
-run "Extracting ${APP_NAME} release archive" unzip -q "$WEMX_ZIP_PATH" -d "$WEMX_EXTRACT_DIR"
-
-if [[ ! -d "${WEMX_EXTRACT_DIR}/wemx" ]]; then
-    rm -rf "$WEMX_TMP_DIR"
-    die "Release archive does not contain the expected wemx/ directory."
-fi
-
-run "Copying ${APP_NAME} files into target directory" bash -c "cp -a '${WEMX_EXTRACT_DIR}/wemx/.' '$TARGET_DIR/'"
-rm -rf "$WEMX_TMP_DIR"
-
-if [[ -n "$WEMX_RELEASE_TAG" ]]; then
-    success "Using latest ${APP_NAME} release: ${WEMX_RELEASE_TAG}"
-fi
+run "Cloning laravel/laravel" git clone "$REPO_URL" "$TARGET_DIR"
 
 cd "$TARGET_DIR"
 
@@ -528,9 +465,9 @@ else
     success ".env already exists"
 fi
 
-run "Generating ${APP_NAME} APP_KEY" php artisan key:generate --force
+run "Generating Laravel APP_KEY" php artisan key:generate --force
 
-# WemX storage / project tree ownership for nginx + php-fpm (TARGET_DIR):
+# Laravel storage / project tree ownership for nginx + php-fpm (TARGET_DIR):
 # - Debian/Ubuntu (nginx or Apache), not RHEL: www-data:www-data
 # - RHEL/CentOS-style (dnf/yum) with nginx: nginx:nginx
 WEB_USER="www-data"
@@ -551,7 +488,7 @@ case "$PKG_MANAGER" in
 esac
 
 if id "$WEB_USER" >/dev/null 2>&1; then
-    run "Setting ${APP_NAME} permissions" bash -c "
+    run "Setting Laravel permissions" bash -c "
         chown -R ${WEB_USER}:${WEB_USER} '$TARGET_DIR'
         chmod -R ug+rwX '$TARGET_DIR/storage' '$TARGET_DIR/bootstrap/cache'
     "
@@ -560,8 +497,20 @@ else
     chmod -R ug+rwX "$TARGET_DIR/storage" "$TARGET_DIR/bootstrap/cache"
 fi
 
-info "Skipping ${APP_NAME} cache optimization as requested"
-info "Skipping ${APP_NAME} database migrations as requested"
+run "Optimizing Laravel config" php artisan config:clear
+run "Caching Laravel routes/config/views" bash -c "php artisan config:cache && php artisan route:cache || true && php artisan view:cache || true"
+
+# Run migrations after install. If DB is not configured yet, continue and show guidance.
+section "Running database migrations"
+if php artisan migrate --force >/tmp/laravel-migrate.log 2>&1; then
+    success "Database migrations completed"
+else
+    warn "Database migration failed"
+    warn "Laravel is installed, but database credentials may not be configured in .env yet."
+    echo
+    echo "Migration output:"
+    tail -n 30 /tmp/laravel-migrate.log || true
+fi
 
 # ------------------------------------------------------------
 # Nginx configuration
@@ -596,7 +545,7 @@ else
     success "Using PHP-FPM socket: $PHP_FPM_SOCKET"
 fi
 
-NGINX_CONF_NAME="wemx-${DOMAIN}"
+NGINX_CONF_NAME="laravel-${DOMAIN}"
 NGINX_CONF=""
 
 if [[ -d /etc/nginx/sites-available ]]; then
@@ -688,15 +637,15 @@ else
     CERTBOT_ARGS+=(--register-unsafely-without-email)
 fi
 
-if certbot "${CERTBOT_ARGS[@]}" >/tmp/wemx-certbot.log 2>&1; then
+if certbot "${CERTBOT_ARGS[@]}" >/tmp/laravel-certbot.log 2>&1; then
     SSL_OK=true
     success "SSL certificate generated successfully"
 else
     warn "SSL certificate generation failed"
-    warn "${APP_NAME} is installed and available over HTTP."
+    warn "Laravel is installed and available over HTTP."
     echo
     echo "Certbot output:"
-    tail -n 30 /tmp/wemx-certbot.log || true
+    tail -n 30 /tmp/laravel-certbot.log || true
     echo
     warn "Common causes:"
     echo "  - DNS for ${DOMAIN} does not point to this server"
@@ -715,7 +664,7 @@ SCHEDULE_CRON_LINE="* * * * * php ${TARGET_DIR}/artisan schedule:run >> /dev/nul
 if crontab -l 2>/dev/null | rg -Fq "$SCHEDULE_CRON_LINE"; then
     success "Cron schedule already exists"
 else
-    run "Adding ${APP_NAME} scheduler cron entry" bash -c "(crontab -l 2>/dev/null || true; echo \"$SCHEDULE_CRON_LINE\") | crontab -"
+    run "Adding Laravel scheduler cron entry" bash -c "(crontab -l 2>/dev/null || true; echo \"$SCHEDULE_CRON_LINE\") | crontab -"
 fi
 
 # ------------------------------------------------------------
@@ -765,7 +714,7 @@ fi
 
 section "Installation complete"
 
-echo -e "${GREEN}${BOLD}${APP_NAME} has been installed successfully.${RESET}"
+echo -e "${GREEN}${BOLD}Laravel has been installed successfully.${RESET}"
 echo
 echo -e "Project directory: ${BOLD}${TARGET_DIR}${RESET}"
 echo -e "Nginx config:      ${BOLD}${NGINX_CONF}${RESET}"
@@ -782,6 +731,7 @@ echo
 echo -e "${DIM}Useful commands:${RESET}"
 echo "  cd ${TARGET_DIR}"
 echo "  php artisan about"
+echo "  php artisan migrate"
 echo "  nginx -t"
 echo "  certbot certificates"
 echo
