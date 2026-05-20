@@ -374,6 +374,7 @@ REQUIRED_EXTENSIONS=(
     session
     tokenizer
     xml
+    soap
 )
 
 MISSING_EXTENSIONS=()
