@@ -2,9 +2,10 @@
 
 set -Eeuo pipefail
 
-APP_NAME="Laravel"
-DEFAULT_DIR="/var/www/laravel"
-REPO_URL="https://github.com/laravel/laravel.git"
+APP_NAME="WemX"
+DEFAULT_DIR="/var/www/wemx"
+GITHUB_REPO="wemxnet/wemx"
+GITHUB_API_URL="https://api.github.com"
 MIN_PHP_VERSION="8.3"
 TARGET_PHP_VERSION="8.5"
 
@@ -81,7 +82,7 @@ run() {
     shift
 
     echo -ne "${BLUE}●${RESET} ${message}..."
-    if "$@" >/tmp/laravel-installer.log 2>&1; then
+    if "$@" >/tmp/wemx-installer.log 2>&1; then
         echo -e "\r${GREEN}✔${RESET} ${message}"
     else
         echo -e "\r${RED}✖${RESET} ${message}"
@@ -90,7 +91,7 @@ run() {
         echo "  $*"
         echo
         echo "Last output:"
-        tail -n 40 /tmp/laravel-installer.log || true
+        tail -n 40 /tmp/wemx-installer.log || true
         exit 1
     fi
 }
@@ -109,7 +110,7 @@ ask() {
 # ------------------------------------------------------------
 
 if [[ "$EUID" -ne 0 ]]; then
-    die "Please run this script as root, for example: sudo bash install-laravel.sh"
+    die "Please run this script as root, for example: sudo bash install-wemx.sh"
 fi
 
 logo
@@ -139,8 +140,10 @@ if [[ -e "$TARGET_DIR" ]]; then
 fi
 
 section "Install settings"
+echo -e "Application:      ${BOLD}${APP_NAME}${RESET}"
 echo -e "Domain:           ${BOLD}${DOMAIN}${RESET}"
 echo -e "Target directory: ${BOLD}${TARGET_DIR}${RESET}"
+echo -e "GitHub repo:      ${BOLD}${GITHUB_REPO}${RESET}"
 echo
 
 read -rp "Continue? [Y/n]: " CONTINUE
@@ -355,7 +358,7 @@ success "PHP $PHP_VERSION is ready"
 # PHP extensions
 # ------------------------------------------------------------
 
-section "Checking Laravel PHP extensions"
+section "Checking WemX PHP extensions"
 
 REQUIRED_EXTENSIONS=(
     ctype
@@ -408,6 +411,7 @@ done
 if [[ -z "$PHP_FPM_SERVICE" ]]; then
     if command -v rc-service >/dev/null 2>&1; then
         PHP_FPM_SERVICE="php-fpm83"
+        run "Starting PHP-FPM service" rc-service "$PHP_FPM_SERVICE" restart
     else
         warn "Could not detect PHP-FPM service automatically"
     fi
@@ -447,27 +451,147 @@ else
 fi
 
 # ------------------------------------------------------------
-# Clone Laravel
+# Download WemX latest release build
 # ------------------------------------------------------------
 
-section "Installing Laravel"
+section "Installing WemX"
 
 mkdir -p "$(dirname "$TARGET_DIR")"
-run "Cloning laravel/laravel" git clone "$REPO_URL" "$TARGET_DIR"
+
+TMP_DIR="$(mktemp -d)"
+RELEASE_JSON="${TMP_DIR}/latest-release.json"
+RELEASE_ZIP="${TMP_DIR}/wemx-release.zip"
+EXTRACT_DIR="${TMP_DIR}/extract"
+
+cleanup() {
+    rm -rf "$TMP_DIR"
+}
+trap cleanup EXIT
+
+GITHUB_HEADERS=(
+    -H "Accept: application/vnd.github+json"
+    -H "X-GitHub-Api-Version: 2022-11-28"
+)
+
+if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+    GITHUB_HEADERS+=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
+fi
+
+run "Fetching latest WemX release metadata" curl -fsSL "${GITHUB_HEADERS[@]}" "${GITHUB_API_URL}/repos/${GITHUB_REPO}/releases/latest" -o "$RELEASE_JSON"
+
+RELEASE_TAG="$(php -r '
+$data = json_decode(file_get_contents($argv[1]), true);
+echo $data["tag_name"] ?? "latest";
+' "$RELEASE_JSON")"
+
+ASSET_NAME="$(php -r '
+$data = json_decode(file_get_contents($argv[1]), true);
+$assets = $data["assets"] ?? [];
+$chosen = null;
+$chosenScore = -1;
+
+foreach ($assets as $asset) {
+    $name = $asset["name"] ?? "";
+    $url = $asset["browser_download_url"] ?? "";
+
+    if ($url === "" || !preg_match("/\.zip$/i", $name)) {
+        continue;
+    }
+
+    $score = 0;
+
+    if (preg_match("/wemx/i", $name)) {
+        $score += 10;
+    }
+
+    if (preg_match("/app/i", $name)) {
+        $score += 8;
+    }
+
+    if (preg_match("/build/i", $name)) {
+        $score += 6;
+    }
+
+    if ($score > $chosenScore) {
+        $chosen = $asset;
+        $chosenScore = $score;
+    }
+}
+
+echo $chosen["name"] ?? "";
+' "$RELEASE_JSON")"
+
+ASSET_URL="$(php -r '
+$data = json_decode(file_get_contents($argv[1]), true);
+$wanted = $argv[2] ?? "";
+
+foreach (($data["assets"] ?? []) as $asset) {
+    if (($asset["name"] ?? "") === $wanted) {
+        echo $asset["browser_download_url"] ?? "";
+        exit;
+    }
+}
+' "$RELEASE_JSON" "$ASSET_NAME")"
+
+if [[ -z "$ASSET_NAME" || -z "$ASSET_URL" ]]; then
+    echo
+    warn "Could not automatically find a WemX app zip build in the latest release assets."
+    echo
+    echo "Available assets:"
+    php -r '
+    $data = json_decode(file_get_contents($argv[1]), true);
+    foreach (($data["assets"] ?? []) as $asset) {
+        echo "  - ".($asset["name"] ?? "unknown").PHP_EOL;
+    }
+    ' "$RELEASE_JSON"
+    echo
+    die "No suitable .zip release asset found."
+fi
+
+success "Using WemX release: ${RELEASE_TAG}"
+success "Using release asset: ${ASSET_NAME}"
+
+run "Downloading WemX release asset" curl -fL "$ASSET_URL" -o "$RELEASE_ZIP"
+
+mkdir -p "$EXTRACT_DIR"
+run "Extracting WemX release asset" unzip -q "$RELEASE_ZIP" -d "$EXTRACT_DIR"
+
+if [[ ! -d "${EXTRACT_DIR}/wemx" ]]; then
+    echo
+    warn "The release asset did not contain the expected wemx/ directory."
+    echo
+    echo "Extracted files:"
+    find "$EXTRACT_DIR" -maxdepth 2 -mindepth 1 -print | sed 's#^#  #'
+    echo
+    die "Invalid WemX release asset structure."
+fi
+
+mkdir -p "$TARGET_DIR"
+run "Copying WemX files into target directory" cp -a "${EXTRACT_DIR}/wemx/." "$TARGET_DIR/"
 
 cd "$TARGET_DIR"
 
-run "Installing Composer dependencies" composer install --no-interaction --prefer-dist --optimize-autoloader
-
-if [[ ! -f ".env" ]]; then
-    run "Creating .env file" cp .env.example .env
+if [[ -f composer.json ]]; then
+    run "Installing Composer dependencies" composer install --no-interaction --prefer-dist --optimize-autoloader
 else
-    success ".env already exists"
+    warn "composer.json was not found; skipping Composer dependency installation"
 fi
 
-run "Generating Laravel APP_KEY" php artisan key:generate --force
+if [[ ! -f ".env" && -f ".env.example" ]]; then
+    run "Creating .env file" cp .env.example .env
+elif [[ -f ".env" ]]; then
+    success ".env already exists"
+else
+    warn ".env.example was not found; skipping .env creation"
+fi
 
-# Laravel storage / project tree ownership for nginx + php-fpm (TARGET_DIR):
+if [[ -f artisan ]]; then
+    run "Generating WemX APP_KEY" php artisan key:generate --force
+else
+    warn "artisan was not found; skipping APP_KEY generation"
+fi
+
+# WemX storage / project tree ownership for nginx + php-fpm (TARGET_DIR):
 # - Debian/Ubuntu (nginx or Apache), not RHEL: www-data:www-data
 # - RHEL/CentOS-style (dnf/yum) with nginx: nginx:nginx
 WEB_USER="www-data"
@@ -488,29 +612,26 @@ case "$PKG_MANAGER" in
 esac
 
 if id "$WEB_USER" >/dev/null 2>&1; then
-    run "Setting Laravel permissions" bash -c "
+    run "Setting WemX permissions" bash -c "
         chown -R ${WEB_USER}:${WEB_USER} '$TARGET_DIR'
-        chmod -R ug+rwX '$TARGET_DIR/storage' '$TARGET_DIR/bootstrap/cache'
+        if [[ -d '$TARGET_DIR/storage' ]]; then chmod -R ug+rwX '$TARGET_DIR/storage'; fi
+        if [[ -d '$TARGET_DIR/bootstrap/cache' ]]; then chmod -R ug+rwX '$TARGET_DIR/bootstrap/cache'; fi
     "
 else
     warn "Web user $WEB_USER not found; skipping ownership change"
-    chmod -R ug+rwX "$TARGET_DIR/storage" "$TARGET_DIR/bootstrap/cache"
+    [[ -d "$TARGET_DIR/storage" ]] && chmod -R ug+rwX "$TARGET_DIR/storage"
+    [[ -d "$TARGET_DIR/bootstrap/cache" ]] && chmod -R ug+rwX "$TARGET_DIR/bootstrap/cache"
 fi
 
-run "Optimizing Laravel config" php artisan config:clear
-run "Caching Laravel routes/config/views" bash -c "php artisan config:cache && php artisan route:cache || true && php artisan view:cache || true"
-
-# Run migrations after install. If DB is not configured yet, continue and show guidance.
-section "Running database migrations"
-if php artisan migrate --force >/tmp/laravel-migrate.log 2>&1; then
-    success "Database migrations completed"
+if [[ -f artisan ]]; then
+    run "Optimizing WemX config" php artisan config:clear
+    run "Caching WemX routes/config/views" bash -c "php artisan config:cache && php artisan route:cache || true && php artisan view:cache || true"
 else
-    warn "Database migration failed"
-    warn "Laravel is installed, but database credentials may not be configured in .env yet."
-    echo
-    echo "Migration output:"
-    tail -n 30 /tmp/laravel-migrate.log || true
+    warn "artisan was not found; skipping optimization"
 fi
+
+# Do not run php artisan migrate.
+# WemX migrations/install steps should be handled separately after configuring the application.
 
 # ------------------------------------------------------------
 # Nginx configuration
@@ -539,13 +660,14 @@ do
 done
 
 if [[ -z "$PHP_FPM_SOCKET" ]]; then
-    PHP_FPM_SOCKET="127.0.0.1:9000"
-    warn "PHP-FPM socket not found; using $PHP_FPM_SOCKET"
+    PHP_FPM_PASS="127.0.0.1:9000"
+    warn "PHP-FPM socket not found; using $PHP_FPM_PASS"
 else
+    PHP_FPM_PASS="unix:${PHP_FPM_SOCKET}"
     success "Using PHP-FPM socket: $PHP_FPM_SOCKET"
 fi
 
-NGINX_CONF_NAME="laravel-${DOMAIN}"
+NGINX_CONF_NAME="wemx-${DOMAIN}"
 NGINX_CONF=""
 
 if [[ -d /etc/nginx/sites-available ]]; then
@@ -580,7 +702,7 @@ server {
     error_page 404 /index.php;
 
     location ~ ^/index\.php(/|$) {
-        fastcgi_pass unix:${PHP_FPM_SOCKET};
+        fastcgi_pass ${PHP_FPM_PASS};
         fastcgi_param SCRIPT_FILENAME \$realpath_root\$fastcgi_script_name;
         include fastcgi_params;
         fastcgi_hide_header X-Powered-By;
@@ -637,15 +759,15 @@ else
     CERTBOT_ARGS+=(--register-unsafely-without-email)
 fi
 
-if certbot "${CERTBOT_ARGS[@]}" >/tmp/laravel-certbot.log 2>&1; then
+if certbot "${CERTBOT_ARGS[@]}" >/tmp/wemx-certbot.log 2>&1; then
     SSL_OK=true
     success "SSL certificate generated successfully"
 else
     warn "SSL certificate generation failed"
-    warn "Laravel is installed and available over HTTP."
+    warn "WemX is installed and available over HTTP."
     echo
     echo "Certbot output:"
-    tail -n 30 /tmp/laravel-certbot.log || true
+    tail -n 30 /tmp/wemx-certbot.log || true
     echo
     warn "Common causes:"
     echo "  - DNS for ${DOMAIN} does not point to this server"
@@ -661,10 +783,14 @@ section "Configuring cron scheduler"
 
 SCHEDULE_CRON_LINE="* * * * * php ${TARGET_DIR}/artisan schedule:run >> /dev/null 2>&1"
 
-if crontab -l 2>/dev/null | rg -Fq "$SCHEDULE_CRON_LINE"; then
-    success "Cron schedule already exists"
+if [[ -f "${TARGET_DIR}/artisan" ]]; then
+    if crontab -l 2>/dev/null | grep -Fq "$SCHEDULE_CRON_LINE"; then
+        success "Cron schedule already exists"
+    else
+        run "Adding WemX scheduler cron entry" bash -c "(crontab -l 2>/dev/null || true; echo \"$SCHEDULE_CRON_LINE\") | crontab -"
+    fi
 else
-    run "Adding Laravel scheduler cron entry" bash -c "(crontab -l 2>/dev/null || true; echo \"$SCHEDULE_CRON_LINE\") | crontab -"
+    warn "artisan was not found; skipping scheduler cron entry"
 fi
 
 # ------------------------------------------------------------
@@ -676,13 +802,14 @@ section "Configuring queue worker"
 QUEUE_SERVICE_NAME="wemx-queue-worker"
 QUEUE_SERVICE_FILE="/etc/systemd/system/${QUEUE_SERVICE_NAME}.service"
 
-if command -v systemctl >/dev/null 2>&1; then
-    if [[ -f "$QUEUE_SERVICE_FILE" ]] || systemctl list-unit-files 2>/dev/null | rg -q "^${QUEUE_SERVICE_NAME}\.service"; then
-        success "Queue worker service already exists: ${QUEUE_SERVICE_NAME}.service"
-    else
-        PHP_BIN="$(command -v php || echo /usr/bin/php)"
+if [[ -f "${TARGET_DIR}/artisan" ]]; then
+    if command -v systemctl >/dev/null 2>&1; then
+        if [[ -f "$QUEUE_SERVICE_FILE" ]] || systemctl list-unit-files 2>/dev/null | grep -q "^${QUEUE_SERVICE_NAME}\.service"; then
+            success "Queue worker service already exists: ${QUEUE_SERVICE_NAME}.service"
+        else
+            PHP_BIN="$(command -v php || echo /usr/bin/php)"
 
-        cat > "$QUEUE_SERVICE_FILE" <<EOF
+            cat > "$QUEUE_SERVICE_FILE" <<EOF
 [Unit]
 Description=WemX Queue Worker
 
@@ -701,11 +828,14 @@ RestartSec=5s
 WantedBy=multi-user.target
 EOF
 
-        run "Reloading systemd daemon" systemctl daemon-reload
-        run "Enabling queue worker service" systemctl enable --now "$QUEUE_SERVICE_NAME"
+            run "Reloading systemd daemon" systemctl daemon-reload
+            run "Enabling queue worker service" systemctl enable --now "$QUEUE_SERVICE_NAME"
+        fi
+    else
+        warn "systemd not detected; skipping queue worker service setup"
     fi
 else
-    warn "systemd not detected; skipping queue worker service setup"
+    warn "artisan was not found; skipping queue worker service setup"
 fi
 
 # ------------------------------------------------------------
@@ -714,8 +844,10 @@ fi
 
 section "Installation complete"
 
-echo -e "${GREEN}${BOLD}Laravel has been installed successfully.${RESET}"
+echo -e "${GREEN}${BOLD}WemX has been installed successfully.${RESET}"
 echo
+echo -e "Release:           ${BOLD}${RELEASE_TAG}${RESET}"
+echo -e "Release asset:     ${BOLD}${ASSET_NAME}${RESET}"
 echo -e "Project directory: ${BOLD}${TARGET_DIR}${RESET}"
 echo -e "Nginx config:      ${BOLD}${NGINX_CONF}${RESET}"
 echo
@@ -731,8 +863,8 @@ echo
 echo -e "${DIM}Useful commands:${RESET}"
 echo "  cd ${TARGET_DIR}"
 echo "  php artisan about"
-echo "  php artisan migrate"
 echo "  nginx -t"
 echo "  certbot certificates"
 echo
+warn "Database migrations were not run by this installer."
 success "Done"
